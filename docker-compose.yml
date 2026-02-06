@@ -1,0 +1,37 @@
+version: '3.8'
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: jobmatch_api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - MONGODB_URL=${MONGODB_URL}
+      - MONGODB_DB_NAME=${MONGODB_DB_NAME}
+      - GOOGLE_APPLICATION_CREDENTIALS=youtube-data-api-v3-468414-e37ad1959b34.json
+      - ADZUNA_APP_ID=${ADZUNA_APP_ID}
+      - ADZUNA_APP_KEY=${ADZUNA_APP_KEY}
+      - GCP_PROJECT_ID=${GCP_PROJECT_ID}
+      - GCP_TENANT_ID=${GCP_TENANT_ID}
+      - CTS_COMPANY_NAME=${CTS_COMPANY_NAME}
+    volumes:
+      - ./logs:/app/logs
+      - ./youtube-data-api-v3-468414-e37ad1959b34.json:/app/youtube-data-api-v3-468414-e37ad1959b34.json:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - jobmatch_network
+
+networks:
+  jobmatch_network:
+    driver: bridge
