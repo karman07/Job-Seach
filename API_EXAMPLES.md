@@ -48,6 +48,7 @@ curl -X GET http://localhost:8000/
   "status": "running",
   "endpoints": {
     "resume_matching": "POST /match/resume",
+    "resume_upload_matching": "POST /match/resume/upload",
     "jd_matching": "POST /match/jd",
     "job_listing": "GET /jobs",
     "manual_refresh": "POST /admin/refresh-jobs",
@@ -140,7 +141,133 @@ curl -X POST http://localhost:8000/match/resume \
 
 ---
 
-## 4. Job Description Matching
+## 4. Resume File Upload Matching
+
+Upload a resume file (PDF, DOCX, or TXT) and get matched jobs automatically.
+
+### Request - Using curl with file upload
+```bash
+# Basic file upload
+curl -X POST http://localhost:8000/match/resume/upload \
+  -F "file=@/path/to/your/resume.pdf"
+
+# With optional filters
+curl -X POST "http://localhost:8000/match/resume/upload?location=New%20York&internship_only=false&job_level=ENTRY_LEVEL&stipend_min=80000" \
+  -F "file=@/path/to/your/resume.pdf"
+
+# Upload DOCX resume
+curl -X POST http://localhost:8000/match/resume/upload \
+  -F "file=@/path/to/resume.docx"
+
+# Upload TXT resume with location filter
+curl -X POST "http://localhost:8000/match/resume/upload?location=Remote" \
+  -F "file=@/path/to/resume.txt"
+```
+
+### Request - Using Python with requests
+```python
+import requests
+
+# Basic upload
+with open('resume.pdf', 'rb') as f:
+    files = {'file': f}
+    response = requests.post(
+        'http://localhost:8000/match/resume/upload',
+        files=files
+    )
+    print(response.json())
+
+# With filters
+with open('resume.pdf', 'rb') as f:
+    files = {'file': f}
+    params = {
+        'location': 'San Francisco',
+        'internship_only': False,
+        'job_level': 'MID_LEVEL',
+        'stipend_min': 100000
+    }
+    response = requests.post(
+        'http://localhost:8000/match/resume/upload',
+        files=files,
+        params=params
+    )
+    print(response.json())
+```
+
+### Supported File Formats
+- **PDF** (.pdf)
+- **Word Document** (.docx)
+- **Plain Text** (.txt)
+
+### File Requirements
+- Maximum file size: 10MB
+- Minimum content: 50 characters
+- File must be a valid resume with readable text
+
+### Query Parameters
+- `location` (optional): Preferred job location (e.g., "San Francisco, CA", "Remote")
+- `internship_only` (optional): Filter for internships only (true/false, default: false)
+- `job_level` (optional): Preferred job level (ENTRY_LEVEL, MID_LEVEL, SENIOR_LEVEL, EXECUTIVE)
+- `stipend_min` (optional): Minimum salary/stipend in USD
+
+### Response
+```json
+{
+  "total_matches": 12,
+  "search_time_ms": 523.8,
+  "jobs": [
+    {
+      "job_id": "65f1a2b3c4d5e6f7g8h9i0j1",
+      "adzuna_id": "4567890",
+      "title": "Software Engineer - Python",
+      "company": "Innovation Labs",
+      "location": "San Francisco, CA",
+      "employment_type": "FULL_TIME",
+      "salary_min": 110000,
+      "salary_max": 150000,
+      "description": "Looking for a talented Python developer...",
+      "redirect_url": "https://adzuna.com/job/...",
+      "relevance_score": 0.92,
+      "is_internship": false
+    }
+  ],
+  "metadata": {
+    "filename": "resume.pdf",
+    "file_type": "application/pdf",
+    "location": "San Francisco, CA",
+    "internship_only": false,
+    "job_level": "MID_LEVEL",
+    "stipend_min": 100000
+  }
+}
+```
+
+### Error Responses
+
+**Invalid file format:**
+```json
+{
+  "detail": "Invalid file extension. Allowed: .pdf, .docx, .txt"
+}
+```
+
+**File too large:**
+```json
+{
+  "detail": "File too large. Maximum size is 10.0MB"
+}
+```
+
+**Empty or invalid resume:**
+```json
+{
+  "detail": "Resume text is too short or empty. Please upload a valid resume with at least 50 characters."
+}
+```
+
+---
+
+## 5. Job Description Matching
 
 Find similar jobs based on a job description.
 
@@ -194,7 +321,7 @@ curl -X POST http://localhost:8000/match/jd \
 
 ---
 
-## 5. Job Listing with Filters
+## 6. Job Listing with Filters
 
 Get paginated job listings with optional filters.
 
@@ -257,7 +384,7 @@ curl -X GET "http://localhost:8000/jobs?skip=20&limit=10"
 
 ---
 
-## 6. Manual Job Refresh (Admin)
+## 7. Manual Job Refresh (Admin)
 
 Trigger an immediate job sync from Adzuna (runs in background).
 

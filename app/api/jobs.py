@@ -1,6 +1,6 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
 from motor.motor_asyncio import AsyncIOMotorDatabase
-from typing import List
+from typing import List, Optional
 import time
 import logging
 from app.database import get_db
@@ -9,13 +9,90 @@ from app.schemas import (
     JobDescriptionMatchRequest,
     JobMatchResponse,
     MatchResultResponse,
-    JobListResponse
+    JobListResponse,
+    JobLevel
 )
 from app.services.matching_service_mongo import MatchingService
 from app.services.job_service_mongo import JobService
+from app.utils.resume_parser import ResumeParser
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+@router.post("/match/resume/upload", response_model=MatchResultResponse)
+async def match_resume_by_upload(
+    file: UploadFile = File(..., description="Resume file (PDF, DOCX, or TXT)"),
+    location: Optional[str] = Query(None, description="Preferred location"),
+    internship_only: Optional[bool] = Query(False, description="Filter for internships only"),
+    job_level: Optional[JobLevel] = Query(None, description="Preferred job level"),
+    stipend_min: Optional[float] = Query(None, ge=0, description="Minimum salary/stipend"),
+    db: AsyncIOMotorDatabase = Depends(get_db)
+):
+    """
+    Match jobs based on an uploaded resume file
+    
+    Upload your resume in PDF, DOCX, or TXT format and get matched jobs.
+    
+    **File Requirements:**
+    - Formats: PDF (.pdf), Word (.docx), or Text (.txt)
+    - Max size: 10MB
+    - Minimum content: 50 characters
+    
+    **Query Parameters:**
+    - **location**: Preferred job location (optional)
+    - **internship_only**: Filter for internships only (optional, default: false)
+    - **job_level**: Preferred job level - ENTRY_LEVEL, MID_LEVEL, SENIOR_LEVEL, EXECUTIVE (optional)
+    - **stipend_min**: Minimum salary/stipend (optional)
+    
+    **Returns:**
+    - Ranked list of matching jobs with relevance scores
+    - Search metadata and timing information
+    """
+    try:
+        start_time = time.time()
+        
+        # Parse resume from uploaded file
+        logger.info(f"Processing resume upload: {file.filename}")
+        resume_text = await ResumeParser.parse_resume(file)
+        
+        # Use matching service to find jobs
+        matching_service = MatchingService(db)
+        
+        matched_jobs = await matching_service.match_resume_to_jobs(
+            resume_text=resume_text,
+            location=location,
+            internship_only=internship_only,
+            job_level=job_level.value if job_level else None,
+            stipend_min=stipend_min,
+            max_results=50
+        )
+        
+        search_time_ms = (time.time() - start_time) * 1000
+        
+        logger.info(
+            f"Resume file match completed: {file.filename} -> {len(matched_jobs)} results in {search_time_ms:.2f}ms"
+        )
+        
+        return MatchResultResponse(
+            total_matches=len(matched_jobs),
+            search_time_ms=search_time_ms,
+            jobs=matched_jobs,
+            metadata={
+                "filename": file.filename,
+                "file_type": file.content_type,
+                "location": location,
+                "internship_only": internship_only,
+                "job_level": job_level.value if job_level else None,
+                "stipend_min": stipend_min
+            }
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Resume file matching failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Matching failed: {str(e)}")
 
 
 @router.post("/match/resume", response_model=MatchResultResponse)
