@@ -4,6 +4,7 @@ import logging
 from app.database import get_db
 from app.schemas import RefreshJobsResponse
 from app.services.job_service_mongo import JobService
+import asyncio
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -12,33 +13,40 @@ router = APIRouter()
 @router.post("/admin/refresh-jobs", response_model=RefreshJobsResponse)
 async def refresh_jobs_manually(
     background_tasks: BackgroundTasks,
+    search_query: str = None,
+    max_pages: int = 20,
     db: AsyncIOMotorDatabase = Depends(get_db)
 ):
     """
     Manually trigger job refresh from Adzuna
     
-    This endpoint triggers an immediate sync of jobs from Adzuna to the database
-    and Google Cloud Talent Solution. The sync runs asynchronously in the background.
+    This endpoint triggers an immediate sync of jobs from Adzuna to the database.
+    The sync runs asynchronously in the background.
     
     Returns immediately with a sync ID that can be used to track progress.
     """
     try:
-        logger.info("Manual job refresh triggered via API")
+        logger.info(f"Manual job refresh triggered via API for query: {search_query}")
         
         # Run in background using FastAPI BackgroundTasks
         job_service = JobService(db)
         
         # Start sync asynchronously
         async def sync_task():
-            await job_service.sync_jobs_from_adzuna(
-                sync_type="manual",
-                max_pages=20
-            )
+            if search_query == "ALL_ENGINEERING":
+                logger.info("Starting mass sync via sync_engineering_jobs...")
+                await job_service.sync_engineering_jobs()
+            else:
+                await job_service.sync_jobs_from_adzuna(
+                    sync_type="manual",
+                    max_pages=max_pages,
+                    search_query=search_query
+                )
         
         background_tasks.add_task(sync_task)
         
         return RefreshJobsResponse(
-            message="Job refresh initiated successfully",
+            message=f"Job refresh for '{search_query}' initiated successfully",
             sync_id=0,  # Will be generated when task runs
             status="in_progress"
         )

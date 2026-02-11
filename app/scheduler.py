@@ -24,10 +24,7 @@ class JobScheduler:
         
         try:
             job_service = JobService(db)
-            sync_log = await job_service.sync_jobs_from_adzuna(
-                sync_type="daily_refresh",
-                max_pages=30  # Fetch more pages for daily refresh
-            )
+            sync_log = await job_service.sync_engineering_jobs()
             
             logger.info(
                 f"Scheduled job refresh completed: "

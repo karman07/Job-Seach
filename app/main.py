@@ -5,7 +5,7 @@ import logging
 from app.config import get_settings
 from app.database import connect_to_mongo, close_mongo_connection
 from app.scheduler import get_scheduler
-from app.api import jobs, admin, health
+from app.api import jobs, admin, health, types
 
 # Configure logging
 logging.basicConfig(
@@ -86,6 +86,7 @@ app.add_middleware(
 # Include routers
 app.include_router(health.router, tags=["Health"])
 app.include_router(jobs.router, tags=["Jobs"])
+app.include_router(types.router, tags=["Job Types"])
 app.include_router(admin.router, tags=["Admin"])
 
 

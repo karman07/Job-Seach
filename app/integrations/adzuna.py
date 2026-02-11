@@ -97,11 +97,12 @@ class AdzunaClient:
     async def fetch_all_jobs(
         self,
         max_pages: int = 5,  # Reduced from 20 to limit API calls
-        what: str = "developer"  # Default search term as per working Postman request
+        what: Optional[str] = None  # Default to None to fetch everything
     ) -> List[Dict[str, Any]]:
         """
         Fetch all available jobs up to max_pages (limited to avoid rate limits)
         Only using minimal params: app_id, app_key, results_per_page, what
+
         Filtering will be done after data retrieval
         
         Returns:

@@ -6,7 +6,6 @@ import logging
 import re
 from collections import Counter
 import math
-from app.integrations.cts import CTSClient
 from app.models import ResumeSearchCache
 from app.schemas import JobMatchResponse
 from app.config import get_settings
@@ -266,7 +265,6 @@ class MatchingService:
         self.db = db
         self.jobs_collection = db.jobs
         self.cache_collection = db.resume_search_cache
-        self.cts_client = CTSClient()
         self.cache_expiry_hours = settings.CACHE_EXPIRY_HOURS
     
     def _generate_cache_key(
@@ -355,107 +353,78 @@ class MatchingService:
             
             return self._build_match_responses(jobs, score_map)
         
-        # Build CTS query parameters
-        location_filters = [location] if location else None
-        employment_types = None
+        # Build query for candidate jobs
+        query_filter = {"status": "active"}
         
-        if internship_only:
-            employment_types = ["INTERNSHIP"]
+        if location:
+            query_filter["location"] = {"$regex": location, "$options": "i"}
         
-        # Try CTS search first, fall back to Local RAG matcher if it fails or returns empty
-        jobs = []
-        score_map = {}
-        use_local_rag = False
+        # If we have too many jobs, we might want to limit?
+        # But user wants 5000 jobs, so fetching all might be heavy if we have 5000.
+        # Let's fetch heavily.
+        # Ideally, we should use a vector db, but for "local RAG" with <10k jobs, we can do in-memory scoring.
         
-        try:
-            # Search CTS
-            cts_results = self.cts_client.search_jobs_with_resume(
-                resume_text=resume_text,
-                location_filters=location_filters,
-                employment_types=employment_types,
-                max_results=max_results
-            )
-            
-            # Check if CTS returned results
-            if not cts_results or len(cts_results) == 0:
-                logger.info("CTS returned empty results, using Local RAG matcher")
-                use_local_rag = True
-            else:
-                # Map CTS results to DB jobs
-                requisition_ids = [r["requisition_id"] for r in cts_results]
-                cursor = self.jobs_collection.find({
-                    "requisition_id": {"$in": requisition_ids},
-                    "status": "active"
-                })
-                jobs = await cursor.to_list(length=len(requisition_ids))
-                
-                # Build score map from CTS results
-                for cts_result in cts_results:
-                    job = next(
-                        (j for j in jobs if j["requisition_id"] == cts_result["requisition_id"]),
-                        None
-                    )
-                    if job:
-                        score_map[str(job["_id"])] = cts_result.get("relevance_score", 0.0)
+        # Optimize: Fetch only necessary fields for initial scoring if possible, but we need text.
+        cursor = self.jobs_collection.find(query_filter)
+        candidate_jobs = await cursor.to_list(length=5000) # Fetch up to 5000 jobs
         
-        except Exception as e:
-            logger.warning(f"CTS search failed, using Local RAG matcher: {str(e)}")
-            use_local_rag = True
+        logger.info(f"Local RAG: Scoring {len(candidate_jobs)} candidate jobs against resume")
         
-        # Use Local RAG matcher as fallback
-        if use_local_rag:
-            logger.info("🔍 Using Local RAG matcher for semantic job matching")
-            
-            # Build query filter
-            query_filter = {"status": "active"}
-            
-            if location:
-                query_filter["location"] = {"$regex": location, "$options": "i"}
-            if internship_only:
-                query_filter["is_internship"] = True
-            
-            # Fetch candidate jobs (fetch more for better matching)
-            cursor = self.jobs_collection.find(query_filter).limit(max_results * 3)
-            candidate_jobs = await cursor.to_list(length=max_results * 3)
-            
-            # Score each job using Local RAG matcher
-            scored_jobs = []
-            for job in candidate_jobs:
-                relevance_score = LocalRAGMatcher.match_resume_to_job(resume_text, job)
-                scored_jobs.append((job, relevance_score))
-            
-            # Sort by score and take top results
-            scored_jobs.sort(key=lambda x: x[1], reverse=True)
-            
-            # Filter out low-scoring matches (threshold: 0.1)
-            scored_jobs = [(job, score) for job, score in scored_jobs if score > 0.1]
-            
-            # Take top max_results
-            scored_jobs = scored_jobs[:max_results]
-            
-            # Build jobs list and score map
-            jobs = [job for job, score in scored_jobs]
-            score_map = {str(job["_id"]): score for job, score in scored_jobs}
-            
-            top_score = scored_jobs[0][1] if scored_jobs else 0.0
-            logger.info(f"Local RAG matcher found {len(jobs)} matches (top score: {top_score:.3f})")
+        # specific filters (pre-scoring or post-scoring? Let's do post-scoring for better semantic relevance, 
+        # but pre-filtering for hard constraints improves performance)
         
-        # Apply additional filters
-        filtered_jobs = self._apply_filters(
-            jobs, job_level, stipend_min, internship_only
-        )
+        # Filter by hard constraints first to reduce scoring load
+        filtered_candidates = []
+        for job in candidate_jobs:
+            # Internship filter
+            if internship_only and not job.get("is_internship"):
+                continue
+            
+            # Stipend filter
+            if stipend_min:
+                s_min = job.get("salary_min")
+                s_max = job.get("salary_max")
+                if not ((s_min and s_min >= stipend_min) or (s_max and s_max >= stipend_min)):
+                    continue
+            
+            # Job Level filter
+            if job_level and job.get("job_level") != job_level:
+                continue
+
+            filtered_candidates.append(job)
+            
+        logger.info(f"Local RAG: {len(filtered_candidates)} jobs passed hard filters")
+
+        # Score jobs
+        scored_jobs = []
+        for job in filtered_candidates:
+            score = LocalRAGMatcher.match_resume_to_job(resume_text, job)
+            if score > 0.05: # Minimum relevance threshold
+                scored_jobs.append((job, score))
         
-        # Cache results only if we found jobs
-        if filtered_jobs:
+        # Sort by score
+        scored_jobs.sort(key=lambda x: x[1], reverse=True)
+        
+        # Take top N
+        top_results = scored_jobs[:max_results]
+        
+        # Build score map
+        score_map = {str(job["_id"]): score for job, score in top_results}
+        jobs = [job for job, score in top_results]
+        
+        logger.info(f"Local RAG: Found {len(jobs)} matches (top score: {top_results[0][1] if top_results else 0.0:.3f})")
+        
+        # Cache results
+        if jobs:
             cache_data = [
-                {"job_id": str(job["_id"]), "score": score_map.get(str(job["_id"]), 0.0)}
-                for job in filtered_jobs
+                 {"job_id": str(j["_id"]), "score": s}
+                 for j, s in top_results
             ]
             await self._cache_results(
                 cache_key, cache_data, location, internship_only, job_level, stipend_min
             )
-        
-        return self._build_match_responses(filtered_jobs, score_map)
+            
+        return self._build_match_responses(jobs, score_map)
     
     async def match_jd_to_jobs(
         self,

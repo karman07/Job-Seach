@@ -4,9 +4,10 @@ from datetime import datetime, timedelta
 import logging
 from app.models import Job, JobSyncLog
 from app.integrations.adzuna import AdzunaClient
-from app.integrations.cts import CTSClient
 from app.config import get_settings
 from bson import ObjectId
+import uuid
+import asyncio
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -18,14 +19,15 @@ class JobService:
     def __init__(self, db: AsyncIOMotorDatabase):
         self.db = db
         self.jobs_collection = db.jobs
+        self.job_types_collection = db.job_types
         self.sync_logs_collection = db.job_sync_logs
         self.adzuna_client = AdzunaClient()
-        self.cts_client = CTSClient()
     
     async def sync_jobs_from_adzuna(
         self,
         sync_type: str = "manual",
-        max_pages: int = 20
+        max_pages: int = 20,
+        search_query: Optional[str] = None
     ) -> JobSyncLog:
         """
         Fetch jobs from Adzuna, save to DB, and sync to CTS
@@ -47,7 +49,8 @@ class JobService:
             
             # Fetch jobs from Adzuna
             jobs_data = await self.adzuna_client.fetch_all_jobs(
-                max_pages=max_pages
+                max_pages=max_pages,
+                what=search_query
             )
             
             # Update sync log
@@ -80,6 +83,22 @@ class JobService:
                         # Create new job
                         await self._create_job(parsed_job)
                         jobs_created += 1
+                    
+                    # Extract and save job type
+                    # Use search_query as the canonical type if available (e.g. "Civil Engineer")
+                    # Otherwise fall back to category or title
+                    type_to_save = search_query if search_query else (parsed_job.get("category") or parsed_job.get("title"))
+                    
+                    if type_to_save:
+                        # Normalize to Title Case
+                        type_to_save = type_to_save.title()
+                        
+                        # Save to job_types collection
+                        await self.job_types_collection.update_one(
+                            {"name": type_to_save}, 
+                            {"$set": {"name": type_to_save, "category": parsed_job.get("category")}}, 
+                            upsert=True
+                        )
                 
                 except Exception as e:
                     logger.error(f"Error processing job {job_data.get('id')}: {str(e)}")
@@ -128,18 +147,10 @@ class JobService:
             raise
     
     async def _create_job(self, job_data: Dict[str, Any]):
-        """Create new job in DB and CTS"""
+        """Create new job in DB"""
         try:
-            # Generate unique requisition ID
-            requisition_id = self.cts_client.generate_requisition_id(job_data["adzuna_id"])
-            
-            # Try to create in CTS (will be skipped if permissions not enabled)
-            cts_job_name = None
-            try:
-                cts_job_name = self.cts_client.create_job(job_data)
-                logger.debug(f"Created job in CTS: {cts_job_name}")
-            except Exception as e:
-                logger.warning(f"CTS creation failed (job will still be stored in DB): {str(e)}")
+            # Generate unique requisition ID locally
+            requisition_id = f"req-{job_data['adzuna_id']}-{uuid.uuid4().hex[:8]}"
             
             # Calculate expiry
             expires_at = datetime.utcnow() + timedelta(days=settings.JOB_EXPIRY_DAYS)
@@ -147,7 +158,7 @@ class JobService:
             # Create job model
             job = Job(
                 adzuna_id=job_data["adzuna_id"],
-                cts_job_name=cts_job_name,
+                cts_job_name=None,
                 requisition_id=requisition_id,
                 title=job_data["title"],
                 description=job_data["description"],
@@ -166,7 +177,7 @@ class JobService:
                 is_remote=job_data.get("is_remote", False),
                 status="active",
                 expires_at=expires_at,
-                last_synced_to_cts=datetime.utcnow() if cts_job_name else None,
+                last_synced_to_cts=None,
                 raw_data=job_data.get("raw_data")
             )
             
@@ -180,19 +191,8 @@ class JobService:
             raise
     
     async def _update_job(self, existing_job: Dict[str, Any], job_data: Dict[str, Any]):
-        """Update existing job in DB and CTS"""
+        """Update existing job in DB"""
         try:
-            # Update CTS if job exists there
-            if existing_job.get("cts_job_name"):
-                try:
-                    self.cts_client.update_job(existing_job["cts_job_name"], job_data)
-                    last_synced = datetime.utcnow()
-                except Exception as e:
-                    logger.error(f"Failed to update job in CTS: {str(e)}")
-                    last_synced = existing_job.get("last_synced_to_cts")
-            else:
-                last_synced = None
-            
             # Update database
             await self.jobs_collection.update_one(
                 {"_id": existing_job["_id"]},
@@ -214,7 +214,6 @@ class JobService:
                         "status": "active",
                         "expires_at": datetime.utcnow() + timedelta(days=settings.JOB_EXPIRY_DAYS),
                         "updated_at": datetime.utcnow(),
-                        "last_synced_to_cts": last_synced,
                         "raw_data": job_data.get("raw_data")
                     }
                 }
@@ -309,3 +308,117 @@ class JobService:
     async def get_job_by_adzuna_id(self, adzuna_id: str) -> Optional[Dict[str, Any]]:
         """Get job by Adzuna ID"""
         return await self.jobs_collection.find_one({"adzuna_id": adzuna_id})
+
+    async def get_engineering_job_types(self) -> List[str]:
+        """Get all stored engineering job types"""
+        cursor = self.job_types_collection.find({}, {"name": 1, "_id": 0})
+        types = await cursor.to_list(length=1000)
+        return sorted([t["name"] for t in types if t.get("name")])
+
+    async def delete_jobs_not_updated_since(self, timestamp: datetime) -> int:
+        """Delete jobs that haven't been updated since the given timestamp"""
+        try:
+            result = await self.jobs_collection.delete_many({
+                "updated_at": {"$lt": timestamp}
+            })
+            count = result.deleted_count
+            logger.info(f"Deleted {count} old jobs not updated since {timestamp}")
+            return count
+        except Exception as e:
+            logger.error(f"Error deleting old jobs: {str(e)}")
+            return 0
+
+    async def sync_engineering_jobs(self) -> JobSyncLog:
+        """
+        Sync top 10 engineering job types and delete old jobs (Daily Refresh).
+        Target: ~5000 jobs.
+        """
+        # Clear existing polluted job types to ensure only generic types remain
+        await self.job_types_collection.delete_many({})
+        logger.info("Cleared job_types collection")
+
+        # Top 10 Engineering Fields (10 pages each * 50 = 500 jobs/type => 5000 total)
+        ENGINEERING_CONFIG = {
+            "Software Engineer": 10,
+            "Data Engineer": 10,
+            "Civil Engineer": 10,
+            "Mechanical Engineer": 10,
+            "Electrical Engineer": 10,
+            "Electronics Engineer": 10,
+            "Computer Engineer": 10,
+            "Chemical Engineer": 10,
+            "Aerospace Engineer": 10,
+            "Industrial Engineer": 10
+        }
+        
+        start_time = datetime.utcnow()
+        logger.info(f"Starting daily engineering sync at {start_time}")
+        
+        total_created = 0
+        total_updated = 0
+        total_failed = 0
+        
+        # Create a parent sync log
+        sync_log = JobSyncLog(
+            sync_type="daily_engineering_mass_sync",
+            status="in_progress"
+        )
+        result = await self.sync_logs_collection.insert_one(sync_log.dict(by_alias=True))
+        sync_log_id = result.inserted_id
+        
+        try:
+            for query, pages in ENGINEERING_CONFIG.items():
+                try:
+                    logger.info(f"Mass Sync: Processing {query} (max_pages={pages})")
+                    # We reuse sync_jobs_from_adzuna but capture its stats
+                    # Note: We don't use its return value to update the main log yet
+                    single_log = await self.sync_jobs_from_adzuna(
+                        sync_type="manual_subtask",
+                        max_pages=pages,
+                        search_query=query
+                    )
+                    total_created += single_log.jobs_created
+                    total_updated += single_log.jobs_updated
+                    total_failed += single_log.jobs_failed
+                    
+                except Exception as e:
+                    logger.error(f"Failed sub-sync for {query}: {str(e)}")
+                    total_failed += 1
+                
+                # Pause to respect Rate Limits
+                await asyncio.sleep(2)
+            
+            # Delete old jobs
+            deleted_count = await self.delete_jobs_not_updated_since(start_time)
+            
+            # Update main log
+            await self.sync_logs_collection.update_one(
+                {"_id": sync_log_id},
+                {
+                    "$set": {
+                        "status": "completed",
+                        "jobs_created": total_created,
+                        "jobs_updated": total_updated,
+                        "jobs_deleted": deleted_count,
+                        "jobs_failed": total_failed,
+                        "completed_at": datetime.utcnow()
+                    }
+                }
+            )
+            
+            updated_log = await self.sync_logs_collection.find_one({"_id": sync_log_id})
+            return JobSyncLog(**updated_log) 
+            
+        except Exception as e:
+            logger.error(f"Mass sync failed: {str(e)}")
+            await self.sync_logs_collection.update_one(
+                {"_id": sync_log_id},
+                {
+                    "$set": {
+                        "status": "failed",
+                        "error_message": str(e),
+                        "completed_at": datetime.utcnow()
+                    }
+                }
+            )
+            raise
