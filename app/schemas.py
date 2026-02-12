@@ -45,6 +45,47 @@ class JobDescriptionMatchRequest(BaseModel):
         return v.strip()
 
 
+class UserJobInteractionRequest(BaseModel):
+    user_id: str = Field(..., description="Unique ID of the user")
+
+
+class UserJobInteractionResponse(BaseModel):
+    message: str
+    status: str
+    is_active: bool  # True if favorited/bookmarked, False if removed
+
+
+class EmailSubscriptionRequest(BaseModel):
+    email: str = Field(..., description="Email address of the user")
+    resume_text: str = Field(..., description="Resume content for job matching")
+    frequency: Optional[str] = Field("biweekly", description="Notification frequency: daily, weekly, or biweekly")
+    is_enabled: Optional[bool] = Field(True, description="Enable or disable notifications")
+    
+    # Optional user preferences
+    location: Optional[str] = Field(None, description="Preferred job location")
+    internship_only: Optional[bool] = Field(False, description="Filter for internships only")
+    job_level: Optional[str] = Field(None, description="Preferred job level: ENTRY_LEVEL, MID_LEVEL, SENIOR_LEVEL, EXECUTIVE")
+    stipend_min: Optional[float] = Field(None, description="Minimum salary/stipend")
+    
+    @validator('email')
+    def validate_email(cls, v):
+        if "@" not in v or "." not in v:
+            raise ValueError('Invalid email address')
+        return v.strip().lower()
+    
+    @validator('resume_text')
+    def validate_resume(cls, v):
+        if len(v.strip()) < 50:
+            raise ValueError('Resume must be at least 50 characters')
+        return v.strip()
+
+class SubscriptionInfo(BaseModel):
+    email: str
+    frequency: str
+    is_enabled: bool
+    created_at: datetime
+
+
 # Response Schemas
 class JobMatchResponse(BaseModel):
     job_id: str  # MongoDB ObjectId as string

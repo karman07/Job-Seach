@@ -42,6 +42,12 @@ class Settings(BaseSettings):
     DEBUG: bool = False
     LOG_LEVEL: str = "INFO"
     
+    # AWS SES Settings
+    AWS_SES_ACCESS_KEY_ID: str = ""
+    AWS_SES_SECRET_ACCESS_KEY: str = ""
+    AWS_SES_FROM_EMAIL: str = "noreply@aiforjob.ai"
+    AWS_SES_REGION: str = "us-east-1"
+    
     @property
     def parent_path(self) -> str:
         """Full parent path for CTS (uses DEFAULT tenant)"""

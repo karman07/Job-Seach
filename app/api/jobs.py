@@ -10,7 +10,11 @@ from app.schemas import (
     JobMatchResponse,
     MatchResultResponse,
     JobListResponse,
-    JobLevel
+    JobLevel,
+    UserJobInteractionRequest,
+    UserJobInteractionResponse,
+    EmailSubscriptionRequest,
+    SubscriptionInfo
 )
 from app.services.matching_service_mongo import MatchingService
 from app.services.job_service_mongo import JobService
@@ -264,3 +268,259 @@ async def get_jobs(
     except Exception as e:
         logger.error(f"Job listing failed: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to fetch jobs: {str(e)}")
+
+
+@router.post("/{job_id}/favorite", response_model=UserJobInteractionResponse)
+async def toggle_favorite(
+    job_id: str,
+    request: UserJobInteractionRequest,
+    db: AsyncIOMotorDatabase = Depends(get_db)
+):
+    """
+    Toggle favorite status for a job
+    
+    - **job_id**: MongoDB ID of the job
+    - **user_id**: ID of the user (passed in request body)
+    """
+    try:
+        job_service = JobService(db)
+        is_favorite = await job_service.toggle_favorite(request.user_id, job_id)
+        
+        status = "added" if is_favorite else "removed"
+        return UserJobInteractionResponse(
+            message=f"Job {status} to favorites",
+            status="success",
+            is_active=is_favorite
+        )
+    except Exception as e:
+        logger.error(f"Toggle favorite failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/favorites", response_model=JobListResponse)
+async def get_favorites(
+    user_id: str = Query(..., description="User ID to fetch favorites for"),
+    db: AsyncIOMotorDatabase = Depends(get_db)
+):
+    """Get all favorite jobs for a user"""
+    try:
+        job_service = JobService(db)
+        jobs = await job_service.get_user_favorites(user_id)
+        
+        job_responses = []
+        for job in jobs:
+            description = job.get("description", "")
+            truncated_desc = description[:500] + "..." if len(description) > 500 else description
+            
+            job_responses.append(JobMatchResponse(
+                job_id=str(job["_id"]),
+                adzuna_id=job["adzuna_id"],
+                title=job["title"],
+                company=job.get("company_display_name") or "Unknown",
+                location=job.get("location"),
+                employment_type=job.get("employment_type"),
+                salary_min=job.get("salary_min"),
+                salary_max=job.get("salary_max"),
+                description=truncated_desc,
+                redirect_url=job.get("redirect_url"),
+                relevance_score=0.0,
+                is_internship=job.get("is_internship", False)
+            ) )
+            
+        return JobListResponse(
+            total=len(job_responses),
+            jobs=job_responses
+        )
+    except Exception as e:
+        logger.error(f"Get favorites failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/{job_id}/bookmark", response_model=UserJobInteractionResponse)
+async def toggle_bookmark(
+    job_id: str,
+    request: UserJobInteractionRequest,
+    db: AsyncIOMotorDatabase = Depends(get_db)
+):
+    """
+    Toggle bookmark status for a job
+    
+    - **job_id**: MongoDB ID of the job
+    - **user_id**: ID of the user (passed in request body)
+    """
+    try:
+        job_service = JobService(db)
+        is_bookmarked = await job_service.toggle_bookmark(request.user_id, job_id)
+        
+        status = "added" if is_bookmarked else "removed"
+        return UserJobInteractionResponse(
+            message=f"Job {status} to bookmarks",
+            status="success",
+            is_active=is_bookmarked
+        )
+    except Exception as e:
+        logger.error(f"Toggle bookmark failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/bookmarks", response_model=JobListResponse)
+async def get_bookmarks(
+    user_id: str = Query(..., description="User ID to fetch bookmarks for"),
+    db: AsyncIOMotorDatabase = Depends(get_db)
+):
+    """Get all bookmarked jobs for a user"""
+    try:
+        job_service = JobService(db)
+        jobs = await job_service.get_user_bookmarks(user_id)
+        
+        job_responses = []
+        for job in jobs:
+            description = job.get("description", "")
+            truncated_desc = description[:500] + "..." if len(description) > 500 else description
+            
+            job_responses.append(JobMatchResponse(
+                job_id=str(job["_id"]),
+                adzuna_id=job["adzuna_id"],
+                title=job["title"],
+                company=job.get("company_display_name") or "Unknown",
+                location=job.get("location"),
+                employment_type=job.get("employment_type"),
+                salary_min=job.get("salary_min"),
+                salary_max=job.get("salary_max"),
+                description=truncated_desc,
+                redirect_url=job.get("redirect_url"),
+                relevance_score=0.0,
+                is_internship=job.get("is_internship", False)
+            ) )
+            
+        return JobListResponse(
+            total=len(job_responses),
+            jobs=job_responses
+        )
+    except Exception as e:
+        logger.error(f"Get bookmarks failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/subscribe", response_model=UserJobInteractionResponse)
+async def subscribe_email(
+    email: str = Query(..., description="Email address"),
+    file: UploadFile = File(..., description="Resume file (PDF, DOCX, or TXT)"),
+    frequency: str = Query("biweekly", description="Notification frequency: daily, weekly, or biweekly"),
+    is_enabled: bool = Query(True, description="Enable or disable notifications"),
+    location: Optional[str] = Query(None, description="Preferred job location"),
+    internship_only: bool = Query(False, description="Filter for internships only"),
+    job_level: Optional[str] = Query(None, description="Job level: ENTRY_LEVEL, MID_LEVEL, SENIOR_LEVEL, EXECUTIVE"),
+    stipend_min: Optional[float] = Query(None, description="Minimum salary/stipend"),
+    db: AsyncIOMotorDatabase = Depends(get_db)
+):
+    """
+    Subscribe for email notifications with resume file upload
+    
+    Upload your resume and set your preferences to receive personalized job matches.
+    
+    **Form Data:**
+    - **email**: User's email address (required)
+    - **file**: Resume file - PDF, DOCX, or TXT (required)
+    - **frequency**: Notification frequency - daily, weekly, biweekly (default: biweekly)
+    - **is_enabled**: Enable/disable notifications (default: true)
+    - **location**: Preferred job location (optional)
+    - **internship_only**: Filter for internships only (default: false)
+    - **job_level**: Preferred job level (optional)
+    - **stipend_min**: Minimum salary/stipend (optional)
+    """
+    try:
+        # Validate email
+        if "@" not in email or "." not in email:
+            raise HTTPException(status_code=400, detail="Invalid email address")
+        
+        # Validate file type
+        allowed_extensions = ['.pdf', '.docx', '.txt']
+        file_ext = file.filename.lower()[file.filename.rfind('.'):]
+        if file_ext not in allowed_extensions:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid file type. Allowed: {', '.join(allowed_extensions)}"
+            )
+        
+        # Parse resume file
+        try:
+            resume_text = await ResumeParser.parse_resume(file)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error parsing resume: {str(e)}")
+            raise HTTPException(status_code=400, detail=f"Failed to parse resume: {str(e)}")
+        
+        # Subscribe with parsed resume
+        job_service = JobService(db)
+        is_new = await job_service.subscribe_email(
+            email=email.strip().lower(),
+            resume_text=resume_text,
+            frequency=frequency,
+            is_enabled=is_enabled,
+            location=location,
+            internship_only=internship_only,
+            job_level=job_level,
+            stipend_min=stipend_min
+        )
+        
+        if is_new:
+            return UserJobInteractionResponse(
+                message=f"Successfully subscribed with resume! You'll receive {frequency} job matches.",
+                status="success",
+                is_active=is_enabled
+            )
+        else:
+            return UserJobInteractionResponse(
+                message="Subscription preferences updated successfully",
+                status="success",
+                is_active=True
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error subscribing email: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/subscriptions", response_model=List[SubscriptionInfo])
+async def get_all_subscriptions(
+    db: AsyncIOMotorDatabase = Depends(get_db)
+):
+    """
+    Get all active email subscriptions (Admin only)
+    """
+    try:
+        job_service = JobService(db)
+        return await job_service.get_all_subscriptions()
+    except Exception as e:
+        logger.error(f"Get subscriptions failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/subscribe", response_model=UserJobInteractionResponse)
+async def unsubscribe_email(
+    email: str = Query(..., description="Email address to unsubscribe"),
+    db: AsyncIOMotorDatabase = Depends(get_db)
+):
+    """
+    Unsubscribe from email notifications
+    """
+    try:
+        job_service = JobService(db)
+        deleted = await job_service.unsubscribe_email(email)
+        
+        if deleted:
+            return UserJobInteractionResponse(
+                message="Successfully unsubscribed",
+                status="success",
+                is_active=False
+            )
+        else:
+            raise HTTPException(status_code=404, detail="Email not found")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Unsubscribe failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))

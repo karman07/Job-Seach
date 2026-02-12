@@ -153,3 +153,52 @@ class ResumeSearchCache(BaseModel):
     
     created_at: datetime = Field(default_factory=datetime.utcnow)
     expires_at: datetime
+
+
+class Favorite(BaseModel):
+    """Favorite model for MongoDB"""
+    model_config = ConfigDict(
+        populate_by_name=True,
+        arbitrary_types_allowed=True
+    )
+    
+    id: Optional[PyObjectId] = Field(default_factory=PyObjectId, alias="_id")
+    user_id: str
+    job_id: str
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class Bookmark(BaseModel):
+    """Bookmark model for MongoDB"""
+    model_config = ConfigDict(
+        populate_by_name=True,
+        arbitrary_types_allowed=True
+    )
+    
+    id: Optional[PyObjectId] = Field(default_factory=PyObjectId, alias="_id")
+    user_id: str
+    job_id: str
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class EmailSubscription(BaseModel):
+    """EmailSubscription model for MongoDB"""
+    model_config = ConfigDict(
+        populate_by_name=True,
+        arbitrary_types_allowed=True
+    )
+    
+    id: Optional[PyObjectId] = Field(default_factory=PyObjectId, alias="_id")
+    email: str
+    resume_text: str  # User's resume content for job matching
+    frequency: str = "biweekly"  # daily, weekly, biweekly
+    is_enabled: bool = True
+    
+    # Optional user preferences
+    location: Optional[str] = None
+    internship_only: bool = False
+    job_level: Optional[str] = None  # ENTRY_LEVEL, MID_LEVEL, SENIOR_LEVEL, EXECUTIVE
+    stipend_min: Optional[float] = None
+    
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)

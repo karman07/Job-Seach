@@ -82,6 +82,20 @@ async def create_indexes():
         await cache_collection.create_index("expires_at")
         await cache_collection.create_index([("resume_hash", ASCENDING), ("expires_at", ASCENDING)])
         
+        # Favorites collection indexes
+        favorites_collection = db.favorites
+        await favorites_collection.create_index([("user_id", ASCENDING), ("job_id", ASCENDING)], unique=True)
+        await favorites_collection.create_index("user_id")
+        
+        # Bookmarks collection indexes
+        bookmarks_collection = db.bookmarks
+        await bookmarks_collection.create_index([("user_id", ASCENDING), ("job_id", ASCENDING)], unique=True)
+        await bookmarks_collection.create_index("user_id")
+        
+        # Email subscriptions collection indexes
+        email_subs_collection = db.email_subscriptions
+        await email_subs_collection.create_index("email", unique=True)
+        
         logger.info("Database indexes created successfully")
         
     except Exception as e:

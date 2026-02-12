@@ -1,9 +1,11 @@
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Query
 from motor.motor_asyncio import AsyncIOMotorDatabase
+from typing import Optional
 import logging
 from app.database import get_db
 from app.schemas import RefreshJobsResponse
 from app.services.job_service_mongo import JobService
+from app.scheduler import get_scheduler
 import asyncio
 
 logger = logging.getLogger(__name__)
@@ -190,4 +192,21 @@ async def sync_all_jobs_to_cts(
         
     except Exception as e:
         logger.error(f"Failed to start CTS sync: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/admin/trigger-emails")
+async def trigger_personalized_emails(
+    email: Optional[str] = Query(None, description="Trigger for specific email only")
+):
+    """
+    Manually trigger the delivery of personalized job emails.
+    If email is provided, only that user receives it.
+    """
+    try:
+        scheduler = get_scheduler()
+        scheduler.trigger_manual_email_delivery(email=email)
+        return {"message": f"Personalized email delivery triggered {'for ' + email if email else 'for all subscribers'}"}
+    except Exception as e:
+        logger.error(f"Failed to trigger emails: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))

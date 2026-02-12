@@ -2,7 +2,7 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime, timedelta
 import logging
-from app.models import Job, JobSyncLog
+from app.models import Job, JobSyncLog, Favorite, Bookmark, EmailSubscription
 from app.integrations.adzuna import AdzunaClient
 from app.config import get_settings
 from bson import ObjectId
@@ -21,6 +21,9 @@ class JobService:
         self.jobs_collection = db.jobs
         self.job_types_collection = db.job_types
         self.sync_logs_collection = db.job_sync_logs
+        self.favorites_collection = db.favorites
+        self.bookmarks_collection = db.bookmarks
+        self.email_subscriptions_collection = db.email_subscriptions
         self.adzuna_client = AdzunaClient()
     
     async def sync_jobs_from_adzuna(
@@ -422,3 +425,137 @@ class JobService:
                 }
             )
             raise
+
+    async def toggle_favorite(self, user_id: str, job_id: str) -> bool:
+        """
+        Toggle favorite status for a job
+        Returns True if favorited, False if unfavorited
+        """
+        existing = await self.favorites_collection.find_one({
+            "user_id": user_id,
+            "job_id": job_id
+        })
+        
+        if existing:
+            await self.favorites_collection.delete_one({"_id": existing["_id"]})
+            return False
+        else:
+            favorite = Favorite(user_id=user_id, job_id=job_id)
+            await self.favorites_collection.insert_one(favorite.dict(by_alias=True))
+            return True
+
+    async def get_user_favorites(self, user_id: str) -> List[Dict[str, Any]]:
+        """Get all favorite jobs for a user"""
+        cursor = self.favorites_collection.find({"user_id": user_id})
+        favorites = await cursor.to_list(length=1000)
+        
+        job_ids = [ObjectId(f["job_id"]) for f in favorites]
+        if not job_ids:
+            return []
+            
+        cursor = self.jobs_collection.find({"_id": {"$in": job_ids}})
+        return await cursor.to_list(length=1000)
+
+    async def toggle_bookmark(self, user_id: str, job_id: str) -> bool:
+        """
+        Toggle bookmark status for a job
+        Returns True if bookmarked, False if unbookmarked
+        """
+        existing = await self.bookmarks_collection.find_one({
+            "user_id": user_id,
+            "job_id": job_id
+        })
+        
+        if existing:
+            await self.bookmarks_collection.delete_one({"_id": existing["_id"]})
+            return False
+        else:
+            bookmark = Bookmark(user_id=user_id, job_id=job_id)
+            await self.bookmarks_collection.insert_one(bookmark.dict(by_alias=True))
+            return True
+
+    async def get_user_bookmarks(self, user_id: str) -> List[Dict[str, Any]]:
+        """Get all bookmarked jobs for a user"""
+        cursor = self.bookmarks_collection.find({"user_id": user_id})
+        bookmarks = await cursor.to_list(length=1000)
+        
+        job_ids = [ObjectId(b["job_id"]) for b in bookmarks]
+        if not job_ids:
+            return []
+            
+        cursor = self.jobs_collection.find({"_id": {"$in": job_ids}})
+        return await cursor.to_list(length=1000)
+
+    async def subscribe_email(
+        self, 
+        email: str, 
+        resume_text: str,
+        frequency: str = "biweekly", 
+        is_enabled: bool = True,
+        location: Optional[str] = None,
+        internship_only: bool = False,
+        job_level: Optional[str] = None,
+        stipend_min: Optional[float] = None
+    ) -> bool:
+        """
+        Record user email subscription with resume and preferences
+        Returns True if newly subscribed/updated, False on failure
+        """
+        from datetime import datetime
+        
+        existing = await self.email_subscriptions_collection.find_one({"email": email})
+        
+        update_data = {
+            "resume_text": resume_text,
+            "frequency": frequency,
+            "is_enabled": is_enabled,
+            "location": location,
+            "internship_only": internship_only,
+            "job_level": job_level,
+            "stipend_min": stipend_min,
+            "updated_at": datetime.utcnow()
+        }
+        
+        if existing:
+            await self.email_subscriptions_collection.update_one(
+                {"email": email},
+                {"$set": update_data}
+            )
+            return True
+            
+        subscription = EmailSubscription(
+            email=email,
+            resume_text=resume_text,
+            frequency=frequency,
+            is_enabled=is_enabled,
+            location=location,
+            internship_only=internship_only,
+            job_level=job_level,
+            stipend_min=stipend_min
+        )
+        await self.email_subscriptions_collection.insert_one(subscription.dict(by_alias=True))
+        return True
+
+    async def get_all_subscriptions(self, frequency: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Get active subscribed emails, optionally filtered by frequency"""
+        query = {"is_enabled": True}
+        if frequency:
+            query["frequency"] = frequency
+            
+        cursor = self.email_subscriptions_collection.find(query)
+        return await cursor.to_list(length=10000)
+
+    async def unsubscribe_email(self, email: str) -> bool:
+        """Remove email from subscriptions"""
+        result = await self.email_subscriptions_collection.delete_one({"email": email})
+        return result.deleted_count > 0
+
+    async def get_personalized_jobs(self, email: str, limit: int = 5) -> List[Dict[str, Any]]:
+        """
+        Suggest top jobs for a user based on their favorites/bookmarks or generic top jobs.
+        For simplicity, if no favorites, return top 5 recent jobs.
+        """
+        # In a real app, we'd look up the user by email first to get their user_id.
+        # Here we'll return top 5 recent active jobs as a 'personalized' fallback.
+        cursor = self.jobs_collection.find({"status": "active"}).sort("created_at", -1).limit(limit)
+        return await cursor.to_list(length=limit)
