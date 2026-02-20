@@ -17,6 +17,7 @@ async def refresh_jobs_manually(
     background_tasks: BackgroundTasks,
     search_query: str = None,
     max_pages: int = 20,
+    country: str = None,
     db: AsyncIOMotorDatabase = Depends(get_db)
 ):
     """
@@ -28,7 +29,7 @@ async def refresh_jobs_manually(
     Returns immediately with a sync ID that can be used to track progress.
     """
     try:
-        logger.info(f"Manual job refresh triggered via API for query: {search_query}")
+        logger.info(f"Manual job refresh triggered via API for query: {search_query}, country: {country}")
         
         # Run in background using FastAPI BackgroundTasks
         job_service = JobService(db)
@@ -42,7 +43,8 @@ async def refresh_jobs_manually(
                 await job_service.sync_jobs_from_adzuna(
                     sync_type="manual",
                     max_pages=max_pages,
-                    search_query=search_query
+                    search_query=search_query,
+                    country=country
                 )
         
         background_tasks.add_task(sync_task)
@@ -58,6 +60,37 @@ async def refresh_jobs_manually(
         raise HTTPException(
             status_code=500,
             detail=f"Failed to trigger job refresh: {str(e)}"
+        )
+
+
+@router.post("/admin/refresh-jobs-multi-region", response_model=RefreshJobsResponse)
+async def refresh_jobs_multi_region_manually(
+    background_tasks: BackgroundTasks,
+    db: AsyncIOMotorDatabase = Depends(get_db)
+):
+    """
+    Manually trigger multi-region engineering job refresh.
+    Ratios: US (70%), India (15%), GB/CA/AU (15%)
+    """
+    try:
+        logger.info("Multi-region manual job refresh triggered via API")
+        
+        job_service = JobService(db)
+        
+        # Start sync asynchronously
+        background_tasks.add_task(job_service.sync_multi_region_engineering_jobs)
+        
+        return RefreshJobsResponse(
+            message="Multi-region job refresh initiated successfully",
+            sync_id=0,
+            status="in_progress"
+        )
+        
+    except Exception as e:
+        logger.error(f"Failed to trigger multi-region job refresh: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to trigger multi-region job refresh: {str(e)}"
         )
 
 

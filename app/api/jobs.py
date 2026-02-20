@@ -207,6 +207,7 @@ async def get_jobs(
     remote: bool = None,
     internship: bool = None,
     location: str = None,
+    country: str = None,
     skip: int = 0,
     limit: int = 50,
     db: AsyncIOMotorDatabase = Depends(get_db)
@@ -220,6 +221,7 @@ async def get_jobs(
     - **remote**: Filter for remote jobs
     - **internship**: Filter for internships
     - **location**: Location filter (partial match)
+    - **country**: Country filter (e.g., India, US, GB)
     - **skip**: Pagination offset
     - **limit**: Results per page (max 100)
     """
@@ -232,6 +234,7 @@ async def get_jobs(
             remote=remote,
             internship=internship,
             location=location,
+            country=country,
             skip=skip,
             limit=min(limit, 100)
         )

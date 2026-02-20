@@ -30,7 +30,8 @@ class JobService:
         self,
         sync_type: str = "manual",
         max_pages: int = 20,
-        search_query: Optional[str] = None
+        search_query: Optional[str] = None,
+        country: Optional[str] = None
     ) -> JobSyncLog:
         """
         Fetch jobs from Adzuna, save to DB, and sync to CTS
@@ -41,7 +42,9 @@ class JobService:
         # Create sync log
         sync_log = JobSyncLog(
             sync_type=sync_type,
-            status="in_progress"
+            status="in_progress",
+            search_query=search_query,
+            country=country
         )
         
         result = await self.sync_logs_collection.insert_one(sync_log.dict(by_alias=True))
@@ -53,7 +56,8 @@ class JobService:
             # Fetch jobs from Adzuna
             jobs_data = await self.adzuna_client.fetch_all_jobs(
                 max_pages=max_pages,
-                what=search_query
+                what=search_query,
+                country=country
             )
             
             # Update sync log
@@ -257,6 +261,7 @@ class JobService:
         remote: Optional[bool] = None,
         internship: Optional[bool] = None,
         location: Optional[str] = None,
+        country: Optional[str] = None,
         skip: int = 0,
         limit: int = 50
     ) -> Tuple[List[Dict[str, Any]], int]:
@@ -291,6 +296,9 @@ class JobService:
         
         if location:
             query["location"] = {"$regex": location, "$options": "i"}
+
+        if country:
+            query["location_structured.country"] = {"$regex": f"^{country}$", "$options": "i"}
         
         # Get total count
         total = await self.jobs_collection.count_documents(query)
@@ -317,6 +325,11 @@ class JobService:
         cursor = self.job_types_collection.find({}, {"name": 1, "_id": 0})
         types = await cursor.to_list(length=1000)
         return sorted([t["name"] for t in types if t.get("name")])
+
+    async def get_all_locations(self) -> List[str]:
+        """Get all unique country locations from stored jobs"""
+        countries = await self.jobs_collection.distinct("location_structured.country")
+        return sorted([c for c in countries if c])
 
     async def delete_jobs_not_updated_since(self, timestamp: datetime) -> int:
         """Delete jobs that haven't been updated since the given timestamp"""
@@ -414,6 +427,102 @@ class JobService:
             
         except Exception as e:
             logger.error(f"Mass sync failed: {str(e)}")
+            await self.sync_logs_collection.update_one(
+                {"_id": sync_log_id},
+                {
+                    "$set": {
+                        "status": "failed",
+                        "error_message": str(e),
+                        "completed_at": datetime.utcnow()
+                    }
+                }
+            )
+            raise
+
+    async def sync_multi_region_engineering_jobs(self) -> JobSyncLog:
+        """
+        Sync engineering jobs from multiple regions with a specific ratio.
+        Ratio: US (70%), India (15%), Others (15% - GB, CA, AU)
+        Total pages remains balanced to avoid excessive API usage.
+        """
+        REGIONAL_CONFIG = [
+            {"country": "us", "weight": 0.7, "queries": ["Software Engineer", "Data Engineer", "Civil Engineer", "Mechanical Engineer", "Electrical Engineer"]},
+            {"country": "in", "weight": 0.15, "queries": ["Software Engineer", "Data Engineer", "Computer Engineer"]},
+            {"country": "gb", "weight": 0.05, "queries": ["Software Engineer", "Electronics Engineer"]},
+            {"country": "ca", "weight": 0.05, "queries": ["Software Engineer", "Environmental Engineer"]},
+            {"country": "au", "weight": 0.05, "queries": ["Software Engineer", "Mining Engineer"]}
+        ]
+        
+        # Total target pages per sync run (distributed by weight)
+        TOTAL_PAGES = 100 
+        
+        start_time = datetime.utcnow()
+        logger.info(f"Starting multi-region engineering sync at {start_time}")
+        
+        total_created = 0
+        total_updated = 0
+        total_failed = 0
+        
+        sync_log = JobSyncLog(
+            sync_type="multi_region_engineering_sync",
+            status="in_progress"
+        )
+        result = await self.sync_logs_collection.insert_one(sync_log.dict(by_alias=True))
+        sync_log_id = result.inserted_id
+        
+        try:
+            for region in REGIONAL_CONFIG:
+                country = region["country"]
+                weight = region["weight"]
+                queries = region["queries"]
+                
+                # Calculate pages for this region
+                region_pages = max(1, int(TOTAL_PAGES * weight))
+                pages_per_query = max(1, region_pages // len(queries))
+                
+                logger.info(f"Region Sync: {country} (total_pages={region_pages}, queries={len(queries)})")
+                
+                for query in queries:
+                    try:
+                        logger.info(f"Syncing {query} in {country} ({pages_per_query} pages)")
+                        single_log = await self.sync_jobs_from_adzuna(
+                            sync_type="manual_subtask",
+                            max_pages=pages_per_query,
+                            search_query=query,
+                            country=country
+                        )
+                        total_created += single_log.jobs_created
+                        total_updated += single_log.jobs_updated
+                        total_failed += single_log.jobs_failed
+                    except Exception as e:
+                        logger.error(f"Failed sub-sync for {query} in {country}: {str(e)}")
+                        total_failed += 1
+                    
+                    await asyncio.sleep(1) # Small gap between queries
+            
+            # Delete old jobs not touched in this sync
+            # deleted_count = await self.delete_jobs_not_updated_since(start_time)
+            deleted_count = 0
+            
+            await self.sync_logs_collection.update_one(
+                {"_id": sync_log_id},
+                {
+                    "$set": {
+                        "status": "completed",
+                        "jobs_created": total_created,
+                        "jobs_updated": total_updated,
+                        "jobs_deleted": deleted_count,
+                        "jobs_failed": total_failed,
+                        "completed_at": datetime.utcnow()
+                    }
+                }
+            )
+            
+            updated_log = await self.sync_logs_collection.find_one({"_id": sync_log_id})
+            return JobSyncLog(**updated_log)
+            
+        except Exception as e:
+            logger.error(f"Multi-region sync failed: {str(e)}")
             await self.sync_logs_collection.update_one(
                 {"_id": sync_log_id},
                 {

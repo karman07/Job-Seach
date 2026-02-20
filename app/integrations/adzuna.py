@@ -25,9 +25,10 @@ class AdzunaClient:
         self.results_per_page = settings.ADZUNA_RESULTS_PER_PAGE
         self.timeout = httpx.Timeout(30.0, connect=10.0)
     
-    def _build_url(self, endpoint: str) -> str:
+    def _build_url(self, endpoint: str, country: Optional[str] = None) -> str:
         """Build full API URL"""
-        return f"{self.BASE_URL}/jobs/{self.country}/{endpoint}"
+        target_country = country or self.country
+        return f"{self.BASE_URL}/jobs/{target_country}/{endpoint}"
     
     @retry(
         stop=stop_after_attempt(2),
@@ -37,10 +38,11 @@ class AdzunaClient:
     async def _make_request(
         self, 
         endpoint: str, 
-        params: Optional[Dict[str, Any]] = None
+        params: Optional[Dict[str, Any]] = None,
+        country: Optional[str] = None
     ) -> Dict[str, Any]:
         """Make HTTP request with retry logic"""
-        url = self._build_url(endpoint)
+        url = self._build_url(endpoint, country=country)
         
         # Add auth params - DON'T include content-type (not needed by Adzuna)
         request_params = {
@@ -75,7 +77,8 @@ class AdzunaClient:
     async def search_jobs(
         self,
         what: Optional[str] = None,
-        page: int = 1
+        page: int = 1,
+        country: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Search for jobs on Adzuna (minimal params - filtering done after retrieval)
@@ -83,6 +86,7 @@ class AdzunaClient:
         Args:
             what: Keywords for job title/description
             page: Page number (1-indexed, included in URL path)
+            country: Optional country code (defaults to settings.ADZUNA_COUNTRY)
         """
         endpoint = f"search/{page}"
         
@@ -91,13 +95,14 @@ class AdzunaClient:
         if what:
             params["what"] = what
         
-        logger.info(f"Searching Adzuna: page={page}, what={what}")
-        return await self._make_request(endpoint, params)
+        logger.info(f"Searching Adzuna ({country or self.country}): page={page}, what={what}")
+        return await self._make_request(endpoint, params, country=country)
     
     async def fetch_all_jobs(
         self,
         max_pages: int = 5,  # Reduced from 20 to limit API calls
-        what: Optional[str] = None  # Default to None to fetch everything
+        what: Optional[str] = None,  # Default to None to fetch everything
+        country: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         """
         Fetch all available jobs up to max_pages (limited to avoid rate limits)
@@ -115,7 +120,7 @@ class AdzunaClient:
         
         while page <= max_pages:
             try:
-                result = await self.search_jobs(page=page, what=what)
+                result = await self.search_jobs(page=page, what=what, country=country)
                 
                 jobs = result.get("results", [])
                 if not jobs:
@@ -197,6 +202,11 @@ class AdzunaClient:
         
         location_data = job.get("location", {})
         
+        area = location_data.get("area", [])
+        country_name = area[0] if len(area) > 0 else None
+        state_name = area[1] if len(area) > 1 else None
+        city_name = area[-1] if len(area) > 2 else None
+        
         return {
             "adzuna_id": job.get("id"),
             "title": job.get("title"),
@@ -204,9 +214,9 @@ class AdzunaClient:
             "company_display_name": job.get("company", {}).get("display_name"),
             "location": location_data.get("display_name"),
             "location_structured": {
-                "city": location_data.get("area", [None])[3] if len(location_data.get("area", [])) > 3 else None,
-                "state": location_data.get("area", [None])[1] if len(location_data.get("area", [])) > 1 else None,
-                "country": location_data.get("area", [None])[0] if len(location_data.get("area", [])) > 0 else None,
+                "city": city_name,
+                "state": state_name,
+                "country": country_name,
                 "lat": location_data.get("latitude"),
                 "lon": location_data.get("longitude")
             },

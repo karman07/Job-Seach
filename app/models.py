@@ -126,6 +126,8 @@ class JobSyncLog(BaseModel):
     jobs_deleted: int = 0
     jobs_failed: int = 0
     
+    search_query: Optional[str] = None
+    country: Optional[str] = None
     error_message: Optional[str] = None
     
     started_at: datetime = Field(default_factory=datetime.utcnow)
