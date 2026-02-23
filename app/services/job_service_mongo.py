@@ -332,13 +332,38 @@ class JobService:
         return sorted([c for c in countries if c])
 
     async def delete_jobs_not_updated_since(self, timestamp: datetime) -> int:
-        """Delete jobs that haven't been updated since the given timestamp"""
+        """Delete jobs that haven't been updated since the given timestamp, excluding favorited/bookmarked jobs"""
         try:
-            result = await self.jobs_collection.delete_many({
-                "updated_at": {"$lt": timestamp}
-            })
+            # We should exclude jobs that are favorited or bookmarked to avoid breaking user experience
+            fav_job_ids = await self.favorites_collection.distinct("job_id")
+            book_job_ids = await self.bookmarks_collection.distinct("job_id")
+            
+            # Combine and normalize IDs
+            protected_ids = set(fav_job_ids + book_job_ids)
+            
+            # Split into ObjectIds and other IDs
+            protected_object_ids = []
+            protected_adzuna_ids = []
+            
+            for jid in protected_ids:
+                if isinstance(jid, str) and ObjectId.is_valid(jid):
+                    protected_object_ids.append(ObjectId(jid))
+                elif isinstance(jid, ObjectId):
+                    protected_object_ids.append(jid)
+                else:
+                    protected_adzuna_ids.append(str(jid))
+            
+            query = {
+                "updated_at": {"$lt": timestamp},
+                "_id": {"$nin": protected_object_ids}
+            }
+            
+            if protected_adzuna_ids:
+                query["adzuna_id"] = {"$nin": protected_adzuna_ids}
+                
+            result = await self.jobs_collection.delete_many(query)
             count = result.deleted_count
-            logger.info(f"Deleted {count} old jobs not updated since {timestamp}")
+            logger.info(f"Deleted {count} old jobs not updated since {timestamp} (protected {len(protected_ids)} jobs)")
             return count
         except Exception as e:
             logger.error(f"Error deleting old jobs: {str(e)}")
@@ -539,7 +564,21 @@ class JobService:
         """
         Toggle favorite status for a job
         Returns True if favorited, False if unfavorited
+        Raises ValueError if job doesn't exist
         """
+        # Validate job existence first
+        job_exists = await self.jobs_collection.find_one({
+            "$or": [
+                {"_id": job_id},
+                {"_id": ObjectId(job_id) if ObjectId.is_valid(job_id) else None},
+                {"adzuna_id": job_id}
+            ]
+        })
+        
+        if not job_exists:
+            logger.warning(f"Attempted to favorite non-existent job: {job_id}")
+            raise ValueError(f"Job with ID {job_id} not found in database. It may have been removed.")
+
         existing = await self.favorites_collection.find_one({
             "user_id": user_id,
             "job_id": job_id
@@ -554,22 +593,65 @@ class JobService:
             return True
 
     async def get_user_favorites(self, user_id: str) -> List[Dict[str, Any]]:
-        """Get all favorite jobs for a user"""
+        """Get all favorite jobs for a user, handling multiple ID formats"""
         cursor = self.favorites_collection.find({"user_id": user_id})
         favorites = await cursor.to_list(length=1000)
         
-        job_ids = [ObjectId(f["job_id"]) for f in favorites]
-        if not job_ids:
+        job_ids = []
+        adzuna_ids = []
+        
+        for f in favorites:
+            jid = f.get("job_id")
+            if not jid:
+                continue
+                
+            if ObjectId.is_valid(jid):
+                job_ids.append(ObjectId(jid))
+            else:
+                # Might be an adzuna_id
+                adzuna_ids.append(str(jid))
+        
+        if not job_ids and not adzuna_ids:
             return []
             
-        cursor = self.jobs_collection.find({"_id": {"$in": job_ids}})
+        # Build query for jobs
+        query_parts = []
+        if job_ids:
+            # Match against both ObjectId and the original string ID if it was valid
+            # In your DB some _ids are stored as strings
+            str_ids = [str(jid) for jid in job_ids]
+            query_parts.append({"_id": {"$in": job_ids + str_ids}})
+            
+        if adzuna_ids:
+            query_parts.append({"adzuna_id": {"$in": adzuna_ids}})
+            
+        if len(query_parts) > 1:
+            query = {"$or": query_parts}
+        else:
+            query = query_parts[0]
+            
+        cursor = self.jobs_collection.find(query)
         return await cursor.to_list(length=1000)
 
     async def toggle_bookmark(self, user_id: str, job_id: str) -> bool:
         """
         Toggle bookmark status for a job
         Returns True if bookmarked, False if unbookmarked
+        Raises ValueError if job doesn't exist
         """
+        # Validate job existence first
+        job_exists = await self.jobs_collection.find_one({
+            "$or": [
+                {"_id": job_id},
+                {"_id": ObjectId(job_id) if ObjectId.is_valid(job_id) else None},
+                {"adzuna_id": job_id}
+            ]
+        })
+        
+        if not job_exists:
+            logger.warning(f"Attempted to bookmark non-existent job: {job_id}")
+            raise ValueError(f"Job with ID {job_id} not found in database. It may have been removed.")
+
         existing = await self.bookmarks_collection.find_one({
             "user_id": user_id,
             "job_id": job_id
@@ -584,15 +666,41 @@ class JobService:
             return True
 
     async def get_user_bookmarks(self, user_id: str) -> List[Dict[str, Any]]:
-        """Get all bookmarked jobs for a user"""
+        """Get all bookmarked jobs for a user, handling multiple ID formats"""
         cursor = self.bookmarks_collection.find({"user_id": user_id})
         bookmarks = await cursor.to_list(length=1000)
         
-        job_ids = [ObjectId(b["job_id"]) for b in bookmarks]
-        if not job_ids:
+        job_ids = []
+        adzuna_ids = []
+        
+        for b in bookmarks:
+            jid = b.get("job_id")
+            if not jid:
+                continue
+                
+            if ObjectId.is_valid(jid):
+                job_ids.append(ObjectId(jid))
+            else:
+                adzuna_ids.append(str(jid))
+        
+        if not job_ids and not adzuna_ids:
             return []
             
-        cursor = self.jobs_collection.find({"_id": {"$in": job_ids}})
+        query_parts = []
+        if job_ids:
+            # Match against both ObjectId and the original string ID
+            str_ids = [str(jid) for jid in job_ids]
+            query_parts.append({"_id": {"$in": job_ids + str_ids}})
+            
+        if adzuna_ids:
+            query_parts.append({"adzuna_id": {"$in": adzuna_ids}})
+            
+        if len(query_parts) > 1:
+            query = {"$or": query_parts}
+        else:
+            query = query_parts[0]
+            
+        cursor = self.jobs_collection.find(query)
         return await cursor.to_list(length=1000)
 
     async def subscribe_email(

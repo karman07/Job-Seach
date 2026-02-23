@@ -295,6 +295,10 @@ async def toggle_favorite(
             status="success",
             is_active=is_favorite
         )
+    except ValueError as e:
+        # This will catch cases where the job doesn't exist
+        logger.warning(f"Toggle favorite validation error: {str(e)}")
+        raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         logger.error(f"Toggle favorite failed: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -361,6 +365,10 @@ async def toggle_bookmark(
             status="success",
             is_active=is_bookmarked
         )
+    except ValueError as e:
+        # This will catch cases where the job doesn't exist
+        logger.warning(f"Toggle bookmark validation error: {str(e)}")
+        raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         logger.error(f"Toggle bookmark failed: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
